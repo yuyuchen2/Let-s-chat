@@ -1,10 +1,24 @@
-name = "cloudflare-chat"
+# Cloudflare Worker 主配置
+name = "yycchatgo"                # ⚠️ 请改成你的 Worker 实际名称
 main = "worker/index.js"
 compatibility_date = "2025-10-15"
 
+# 部署环境设置
+workers_dev = true
+account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID"   # ⚠️ 这里填你的 Cloudflare 账户 ID
+route = ""
+zone_id = ""
+
+# 绑定 D1 数据库
 [[d1_databases]]
-binding = "DB"
-database_name = "chat_db"
-database_id = "YOUR_D1_DATABASE_ID"
-# wrangler.toml
-name = 'yycchatgo'
+binding = "DB"                    # 这个名称在代码里通过 env.DB 调用
+database_name = "your_d1_database_name"  # ⚠️ 改成你在 Cloudflare 控制台创建的 D1 数据库名
+database_id = "YOUR_D1_DATABASE_ID"      # ⚠️ 改成 D1 数据库的 ID
+
+# KV 或 Durable Object 可选配置
+# [[kv_namespaces]]
+# binding = "SESSIONS"
+# id = "YOUR_KV_NAMESPACE_ID"
+
+# 其他设置（可选）
+# compatibility_flags = ["nodejs_compat"]
