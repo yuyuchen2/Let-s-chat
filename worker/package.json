@@ -1,6 +1,9 @@
 {
-  "dependencies": {
-    "hono": "^2.0.0",
-    "hono/cors": "^2.0.0"
+  "name": "cloudflare-chat-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "wrangler dev --config ../wrangler.toml",
+    "deploy": "wrangler deploy --config ../wrangler.toml"
   }
 }
