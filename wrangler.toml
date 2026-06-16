@@ -1,13 +1,9 @@
-# Cloudflare Worker configuration
+# Cloudflare Worker configuration for connected Workers Builds.
+# Do not hard-code account_id here: Cloudflare provides the account context in CI.
 name = "letschat"
 main = "worker/index.js"
 compatibility_date = "2025-10-15"
 workers_dev = true
 
-# D1 database binding used by worker/index.js as env.DB.
-# Replace these placeholders with your real D1 database values before deploying
-# if the connected Cloudflare project has not injected them already.
-[[d1_databases]]
-binding = "DB"
-database_name = "your_d1_database_name"
-database_id = "YOUR_D1_DATABASE_ID"
+# Configure the required D1 binding named "DB" in the Cloudflare dashboard
+# or add a real [[d1_databases]] block locally with your own database_id.
