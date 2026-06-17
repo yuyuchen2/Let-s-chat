@@ -5,5 +5,7 @@ main = "worker/chat-worker.mjs"
 compatibility_date = "2025-10-15"
 workers_dev = true
 
-# Configure the required D1 binding named "DB" in the Cloudflare dashboard
-# or add a real [[d1_databases]] block locally with your own database_id.
+[[d1_databases]]
+binding = "DB"
+database_name = "chat_db"
+database_id = "d3d83a2c-765a-4993-a4aa-0cdd0b7e6ae9"
