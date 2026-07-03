@@ -1,3 +1,5 @@
+const ALLOWED_ORIGINS = ['https://chat1.yyc2.dpdns.org']
+
 const jsonHeadersBase = {
   'Content-Type': 'application/json; charset=utf-8',
   'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
@@ -45,19 +47,35 @@ const getSessionTokenFromRequest = (request) => {
   return null
 }
 
+// Set cookie now includes Domain for .yyc2.dpdns.org to allow subdomain sharing.
+// If you do not want cross-subdomain cookies, remove the Domain attribute.
 const makeSetCookieHeader = (token, maxAgeSeconds = 60 * 60 * 24 * 7) => {
-  return `letschat_session=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeSeconds}`
+  return `letschat_session=${token}; Domain=.yyc2.dpdns.org; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeSeconds}`
+}
+
+const isOriginAllowed = (origin) => {
+  if (!origin) return false
+  return ALLOWED_ORIGINS.includes(origin)
 }
 
 const json = (payload, status = 200, request = null) => {
   const headers = { ...jsonHeadersBase }
   if (request) {
     const origin = request.headers.get('Origin')
-    if (origin) headers['Access-Control-Allow-Origin'] = origin
-    else headers['Access-Control-Allow-Origin'] = '*'
+    if (origin) {
+      if (!isOriginAllowed(origin)) {
+        // Explicitly reject unauthorized origins
+        return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers })
+      }
+      headers['Access-Control-Allow-Origin'] = origin
+    } else {
+      // No Origin header (same-origin or server-side requests) — set default allowed origin
+      headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGINS[0]
+    }
   } else {
-    headers['Access-Control-Allow-Origin'] = '*'
+    headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGINS[0]
   }
+  headers['Access-Control-Allow-Credentials'] = 'true'
   return new Response(JSON.stringify(payload), { status, headers })
 }
 
@@ -191,8 +209,10 @@ const removePresence = async (request, env) => {
   await env.DB.prepare('DELETE FROM sessions WHERE session_token = ?').bind(session.session_token).run()
   const headers = { ...jsonHeadersBase }
   const origin = request.headers.get('Origin')
-  headers['Access-Control-Allow-Origin'] = origin || '*'
-  headers['Set-Cookie'] = 'letschat_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+  if (origin && !isOriginAllowed(origin)) return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers })
+  headers['Access-Control-Allow-Origin'] = origin || ALLOWED_ORIGINS[0]
+  headers['Set-Cookie'] = 'letschat_session=; Domain=.yyc2.dpdns.org; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+  headers['Access-Control-Allow-Credentials'] = 'true'
   return new Response(JSON.stringify({ ok: true }), { status: 200, headers })
 }
 
@@ -249,8 +269,10 @@ const login = async (request, env) => {
   await env.DB.prepare('INSERT INTO online_users (session_token, user, last_seen) VALUES (?, ?, ?) ON CONFLICT(session_token) DO UPDATE SET last_seen = excluded.last_seen, user = excluded.user').bind(token, userRow.username, Date.now()).run()
   const headers = { ...jsonHeadersBase }
   const origin = request.headers.get('Origin')
-  headers['Access-Control-Allow-Origin'] = origin || '*'
+  if (origin && !isOriginAllowed(origin)) return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers })
+  headers['Access-Control-Allow-Origin'] = origin || ALLOWED_ORIGINS[0]
   headers['Set-Cookie'] = makeSetCookieHeader(token)
+  headers['Access-Control-Allow-Credentials'] = 'true'
   return new Response(JSON.stringify({ ok: true, user: userRow.username }), { status: 200, headers })
 }
 
@@ -260,7 +282,9 @@ export default {
     if (request.method === 'OPTIONS') {
       const headers = { ...jsonHeadersBase }
       const origin = request.headers.get('Origin')
-      headers['Access-Control-Allow-Origin'] = origin || '*'
+      if (origin && !isOriginAllowed(origin)) return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers })
+      headers['Access-Control-Allow-Origin'] = origin || ALLOWED_ORIGINS[0]
+      headers['Access-Control-Allow-Credentials'] = 'true'
       return new Response(null, { status: 204, headers })
     }
     if (url.pathname === '/') return makeHtml(chatPage)
