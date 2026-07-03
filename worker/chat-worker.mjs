@@ -1,4 +1,3 @@
-import bcrypt from 'bcryptjs'
 
 const jsonHeadersBase = {
   'Content-Type': 'application/json; charset=utf-8',
@@ -68,6 +67,44 @@ const makeHtml = (payload) => new Response(payload, { status: 200, headers: page
 const validateDatabase = (env) => {
   if (!env.DB) return json({ error: 'D1 database binding "DB" is not configured.' }, 500)
   return null
+}
+
+// PBKDF2-based password hashing (uses Web Crypto, no external deps)
+const toBase64 = (buf) => {
+  let binary = ''
+  const bytes = new Uint8Array(buf)
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i])
+  return btoa(binary)
+}
+const fromBase64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0))
+
+async function hashPassword(password, iterations = 100000) {
+  const enc = new TextEncoder()
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), { name: 'PBKDF2' }, false, ['deriveBits'])
+  const derivedBits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, keyMaterial, 256)
+  return `pbkdf2_sha256$${iterations}$${toBase64(salt)}$${toBase64(derivedBits)}`
+}
+
+async function verifyPassword(password, stored) {
+  try {
+    const parts = stored.split('$')
+    if (parts.length !== 4) return false
+    const iterations = Number(parts[1])
+    const salt = fromBase64(parts[2])
+    const expected = fromBase64(parts[3])
+    const enc = new TextEncoder()
+    const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), { name: 'PBKDF2' }, false, ['deriveBits'])
+    const derivedBits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, keyMaterial, expected.byteLength * 8)
+    const a = new Uint8Array(derivedBits)
+    const b = expected
+    if (a.length !== b.length) return false
+    let diff = 0
+    for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i]
+    return diff === 0
+  } catch (e) {
+    return false
+  }
 }
 
 // session helpers
@@ -151,10 +188,9 @@ const register = async (request, env) => {
   if (!username) return json({ error: '用户名不能为空', code: 'USERNAME_REQUIRED', field: 'username' }, 400, request)
   if (username.length > 50) return json({ error: '用户名不能超过 50 字符', code: 'USERNAME_TOO_LONG', field: 'username' }, 400, request)
   if (!password || password.length < PASSWORD_MIN_LENGTH) return json({ error: `密码至少 ${PASSWORD_MIN_LENGTH} 字符`, code: 'PASSWORD_TOO_SHORT', field: 'password' }, 400, request)
-  const saltRounds = 12
-  const hash = await bcrypt.hash(password, saltRounds)
   try {
     const now = Date.now()
+    const hash = await hashPassword(password)
     await env.DB.prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)').bind(username, hash, now).run()
     return json({ ok: true, user: username }, 201, request)
   } catch (err) {
@@ -181,7 +217,7 @@ const login = async (request, env) => {
   if (userRow.locked_until && userRow.locked_until > now) {
     return json({ error: '账户被暂时锁定，请稍后重试', code: 'ACCOUNT_LOCKED', retry_after_ms: userRow.locked_until - now }, 403, request)
   }
-  const passwordMatch = await bcrypt.compare(password, userRow.password_hash)
+  const passwordMatch = await verifyPassword(password, userRow.password_hash)
   if (!passwordMatch) {
     const attempts = (userRow.failed_login_attempts || 0) + 1
     const lockedUntil = attempts >= MAX_FAILED ? now + LOCK_DURATION_MS : null
