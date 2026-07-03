@@ -1,12 +1,9 @@
 {
-  "dependencies": {
-    "hono": "^4.7.0"
-  },
-  "name": "cloudflare-chat-worker",
-  "private": true,
+  "name": "worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker for LetsChat",
   "type": "module",
-  "scripts": {
-    "start": "wrangler dev",
-    "deploy": "wrangler deploy"
+  "dependencies": {
+    "bcryptjs": "^2.4.3"
   }
 }
