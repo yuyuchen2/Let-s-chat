@@ -1,3 +1,5 @@
+const ALLOWED_ORIGINS = ['https://chat1.yyc2.dpdns.org']
+
 const jsonHeadersBase = {
   'Content-Type': 'application/json; charset=utf-8',
   'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
