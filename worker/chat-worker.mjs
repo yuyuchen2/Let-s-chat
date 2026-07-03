@@ -1,4 +1,3 @@
-
 const jsonHeadersBase = {
   'Content-Type': 'application/json; charset=utf-8',
   'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
@@ -70,13 +69,31 @@ const validateDatabase = (env) => {
 }
 
 // PBKDF2-based password hashing (uses Web Crypto, no external deps)
+// base64 helpers with cross-environment fallbacks (btoa/atob in Workers, Buffer in Node during build/tests)
 const toBase64 = (buf) => {
-  let binary = ''
-  const bytes = new Uint8Array(buf)
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i])
-  return btoa(binary)
+  if (typeof btoa === 'function') {
+    let binary = ''
+    const bytes = new Uint8Array(buf)
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i])
+    return btoa(binary)
+  } else if (typeof Buffer !== 'undefined') {
+    return Buffer.from(buf).toString('base64')
+  }
+  throw new Error('No base64 encoder available')
 }
-const fromBase64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0))
+
+const fromBase64 = (s) => {
+  if (typeof atob === 'function') {
+    const binary = atob(s)
+    const arr = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) arr[i] = binary.charCodeAt(i)
+    return arr
+  } else if (typeof Buffer !== 'undefined') {
+    const b = Buffer.from(s, 'base64')
+    return Uint8Array.from(b)
+  }
+  throw new Error('No base64 decoder available')
+}
 
 async function hashPassword(password, iterations = 100000) {
   const enc = new TextEncoder()
