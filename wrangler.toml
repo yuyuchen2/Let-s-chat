@@ -1,6 +1,6 @@
 # Cloudflare Worker configuration for connected Workers Builds.
 # Do not hard-code account_id here: Cloudflare provides the account context in CI.
-name = "letschat"
+name = "let-s-chat"
 main = "worker/chat-worker.mjs"
 compatibility_date = "2025-10-15"
 workers_dev = true
