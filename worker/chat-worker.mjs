@@ -179,6 +179,100 @@ const chatPage = String.raw`<!doctype html>
 
 const ONLINE_WINDOW_MS = 60 * 1000
 
+const SESSION_COOKIE = 'letschat_session'
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7
+const SESSION_MAX_AGE_SECONDS = SESSION_TTL_MS / 1000
+const PASSWORD_ITERATIONS = 210000
+const PASSWORD_SALT_BYTES = 16
+const PASSWORD_KEY_BYTES = 32
+const MAX_FAILED = 5
+const LOCK_DURATION_MS = 15 * 60 * 1000
+
+const bytesToBase64 = (bytes) => btoa(String.fromCharCode(...bytes))
+
+const base64ToBytes = (value) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0))
+
+const timingSafeEqual = (left, right) => {
+  if (left.byteLength !== right.byteLength) return false
+  let diff = 0
+  for (let index = 0; index < left.byteLength; index += 1) {
+    diff |= left[index] ^ right[index]
+  }
+  return diff === 0
+}
+
+const derivePasswordKey = async (password, salt, iterations = PASSWORD_ITERATIONS) => {
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits'],
+  )
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
+    keyMaterial,
+    PASSWORD_KEY_BYTES * 8,
+  )
+  return new Uint8Array(bits)
+}
+
+const hashPassword = async (password) => {
+  const salt = crypto.getRandomValues(new Uint8Array(PASSWORD_SALT_BYTES))
+  const key = await derivePasswordKey(password, salt)
+  return `pbkdf2-sha256$${PASSWORD_ITERATIONS}$${bytesToBase64(salt)}$${bytesToBase64(key)}`
+}
+
+const verifyPassword = async (password, storedHash) => {
+  if (typeof storedHash !== 'string') return false
+  const [algorithm, iterationsRaw, saltRaw, keyRaw] = storedHash.split('$')
+  const iterations = Number(iterationsRaw)
+  if (algorithm !== 'pbkdf2-sha256' || !Number.isSafeInteger(iterations) || iterations <= 0 || !saltRaw || !keyRaw) {
+    return false
+  }
+
+  try {
+    const expected = base64ToBytes(keyRaw)
+    const actual = await derivePasswordKey(password, base64ToBytes(saltRaw), iterations)
+    return timingSafeEqual(actual, expected)
+  } catch {
+    return false
+  }
+}
+
+const generateSessionToken = () => {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+const getCookie = (request, name) => {
+  const cookie = request.headers.get('cookie') || ''
+  const prefix = `${name}=`
+  return cookie
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix))
+    ?.slice(prefix.length) || null
+}
+
+const getSession = async (request, env) => {
+  const token = getCookie(request, SESSION_COOKIE)
+  if (!token) return null
+
+  const { results } = await env.DB.prepare('SELECT user, expires_at FROM sessions WHERE session_token = ? LIMIT 1').bind(token).all()
+  const session = results && results[0]
+  if (!session) return null
+
+  if (session.expires_at <= Date.now()) {
+    await env.DB.prepare('DELETE FROM online_users WHERE session_token = ?').bind(token).run()
+    await env.DB.prepare('DELETE FROM sessions WHERE session_token = ?').bind(token).run()
+    return null
+  }
+
+  return { token, user: session.user, expires_at: session.expires_at }
+}
+
+
 const normalizeUser = (value) => (typeof value === 'string' ? value.trim() : '')
 
 const readJsonBody = async (request) => {
@@ -229,30 +323,18 @@ const createMessage = async (request, env) => {
     return json({ error: 'Content too long.' }, 400)
   }
 
-  // session-based: get session token from cookie
-  const cookie = request.headers.get('cookie') || ''
-  const token = cookie.split(';').map(p=>p.trim()).find(p=>p.startsWith('letschat_session='))
-  let user = null
-  if (token) {
-    const t = token.split('=')[1]
-    const { results } = await env.DB.prepare('SELECT user, expires_at FROM sessions WHERE session_token = ? LIMIT 1').bind(t).all()
-    if (results && results.length) {
-      const s = results[0]
-      if (s.expires_at > Date.now()) user = s.user
-    }
-  }
-
-  if (!user) return json({ error: 'Not authenticated' }, 401)
+  const session = await getSession(request, env)
+  if (!session) return json({ error: 'Not authenticated' }, 401)
 
   const createdAt = Date.now()
   const result = await env.DB.prepare('INSERT INTO messages (session_token, user, content, created_at) VALUES (?, ?, ?, ?)')
-    .bind(token ? token.split('=')[1] : null, user, content, createdAt)
+    .bind(session.token, session.user, content, createdAt)
     .run()
 
   return json(
     {
       id: result.meta.last_row_id,
-      user,
+      user: session.user,
       content,
       created_at: createdAt,
     },
@@ -264,42 +346,31 @@ const touchPresence = async (request, env) => {
   const missingDb = validateDatabase(env)
   if (missingDb) return missingDb
 
-  // session from cookie
-  const cookie = request.headers.get('cookie') || ''
-  const token = cookie.split(';').map(p=>p.trim()).find(p=>p.startsWith('letschat_session='))
-  if (!token) return json({ error: 'Not authenticated' }, 401)
-  const t = token.split('=')[1]
-
-  const { results } = await env.DB.prepare('SELECT user, expires_at FROM sessions WHERE session_token = ? LIMIT 1').bind(t).all()
-  if (!results || results.length === 0) return json({ error: 'Not authenticated' }, 401)
-  const s = results[0]
-  if (s.expires_at < Date.now()) return json({ error: 'Session expired' }, 401)
+  const session = await getSession(request, env)
+  if (!session) return json({ error: 'Not authenticated' }, 401)
 
   const lastSeen = Date.now()
   await env.DB.prepare(
     'INSERT INTO online_users (session_token, user, last_seen) VALUES (?, ?, ?) ON CONFLICT(session_token) DO UPDATE SET last_seen = excluded.last_seen, user = excluded.user',
   )
-    .bind(t, s.user, lastSeen)
+    .bind(session.token, session.user, lastSeen)
     .run()
 
-  return json({ user: s.user, last_seen: lastSeen })
+  return json({ user: session.user, last_seen: lastSeen })
 }
 
 const removePresence = async (request, env) => {
   const missingDb = validateDatabase(env)
   if (missingDb) return missingDb
 
-  // session from cookie
-  const cookie = request.headers.get('cookie') || ''
-  const token = cookie.split(';').map(p=>p.trim()).find(p=>p.startsWith('letschat_session='))
+  const token = getCookie(request, SESSION_COOKIE)
   if (!token) return json({ ok: true })
-  const t = token.split('=')[1]
 
-  await env.DB.prepare('DELETE FROM online_users WHERE session_token = ?').bind(t).run()
-  await env.DB.prepare('DELETE FROM sessions WHERE session_token = ?').bind(t).run()
+  await env.DB.prepare('DELETE FROM online_users WHERE session_token = ?').bind(token).run()
+  await env.DB.prepare('DELETE FROM sessions WHERE session_token = ?').bind(token).run()
 
   const headers = { ...jsonHeadersBase }
-  headers['Set-Cookie'] = 'letschat_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+  headers['Set-Cookie'] = `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`
   return new Response(JSON.stringify({ ok: true }), { status: 200, headers })
 }
 
@@ -368,29 +439,23 @@ const login = async (request, env) => {
 
   await env.DB.prepare('UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?').bind(userRow.id).run()
   const token = generateSessionToken()
-  const expiresAt = Date.now() + 1000 * 60 * 60 * 24 * 7
+  const expiresAt = Date.now() + SESSION_TTL_MS
   await env.DB.prepare('INSERT INTO sessions (session_token, user, created_at, expires_at) VALUES (?, ?, ?, ?)').bind(token, userRow.username, Date.now(), expiresAt).run()
   await env.DB.prepare('INSERT INTO online_users (session_token, user, last_seen) VALUES (?, ?, ?) ON CONFLICT(session_token) DO UPDATE SET last_seen = excluded.last_seen, user = excluded.user').bind(token, userRow.username, Date.now()).run()
 
   const headers = { ...jsonHeadersBase }
   headers['Access-Control-Allow-Origin'] = 'https://chat1.yyc2.dpdns.org'
   headers['Access-Control-Allow-Credentials'] = 'true'
-  headers['Set-Cookie'] = `letschat_session=${token}; Domain=.yyc2.dpdns.org; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${60 * 60 * 24 * 7}`
+  headers['Set-Cookie'] = `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}`
   return new Response(JSON.stringify({ ok: true, user: userRow.username }), { status: 200, headers })
 }
 
 const whoami = async (request, env) => {
   const missingDb = validateDatabase(env)
   if (missingDb) return missingDb
-  const cookie = request.headers.get('cookie') || ''
-  const token = cookie.split(';').map(p=>p.trim()).find(p=>p.startsWith('letschat_session='))
-  if (!token) return json({ ok: false }, 200)
-  const t = token.split('=')[1]
-  const { results } = await env.DB.prepare('SELECT user, expires_at FROM sessions WHERE session_token = ? LIMIT 1').bind(t).all()
-  if (!results || results.length === 0) return json({ ok: false }, 200)
-  const s = results[0]
-  if (s.expires_at < Date.now()) return json({ ok: false }, 200)
-  return json({ ok: true, user: s.user }, 200)
+  const session = await getSession(request, env)
+  if (!session) return json({ ok: false }, 200)
+  return json({ ok: true, user: session.user }, 200)
 }
 
 export default {
