@@ -5,6 +5,7 @@ const jsonHeadersBase = {
   'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
   'Access-Control-Allow-Credentials': 'true',
+  'Access-Control-Allow-Origin': ALLOWED_ORIGINS[0],
 }
 
 const pageHeaders = {
@@ -461,12 +462,13 @@ const whoami = async (request, env) => {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
+    const origin = request.headers.get('Origin')
+    const allowedOrigin = origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]
 
     if (request.method === 'OPTIONS') {
       const headers = { ...jsonHeadersBase }
-      const origin = request.headers.get('Origin')
       if (origin && !ALLOWED_ORIGINS.includes(origin)) return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers })
-      headers['Access-Control-Allow-Origin'] = origin || ALLOWED_ORIGINS[0]
+      headers['Access-Control-Allow-Origin'] = allowedOrigin
       headers['Access-Control-Allow-Credentials'] = 'true'
       return new Response(null, { status: 204, headers })
     }
@@ -475,15 +477,30 @@ export default {
       return new Response(chatPage, { headers: pageHeaders })
     }
 
-    if (url.pathname === '/api/messages' && request.method === 'GET') return getMessages(env)
-    if (url.pathname === '/api/messages' && request.method === 'POST') return createMessage(request, env)
-    if (url.pathname === '/api/presence' && request.method === 'POST') return touchPresence(request, env)
-    if (url.pathname === '/api/presence' && request.method === 'DELETE') return removePresence(request, env)
-    if (url.pathname === '/api/users/online' && request.method === 'GET') return getOnlineUsers(env)
-    if (url.pathname === '/api/register' && request.method === 'POST') return register(request, env)
-    if (url.pathname === '/api/login' && request.method === 'POST') return login(request, env)
-    if (url.pathname === '/api/whoami' && request.method === 'GET') return whoami(request, env)
+    // Helper to add CORS headers to responses
+    const withCors = (response) => {
+      if (!response.headers.has('Access-Control-Allow-Origin')) {
+        const headers = new Headers(response.headers)
+        headers.set('Access-Control-Allow-Origin', allowedOrigin)
+        headers.set('Access-Control-Allow-Credentials', 'true')
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers
+        })
+      }
+      return response
+    }
 
-    return json({ error: 'Not found' }, 404)
+    if (url.pathname === '/api/messages' && request.method === 'GET') return withCors(await getMessages(env))
+    if (url.pathname === '/api/messages' && request.method === 'POST') return withCors(await createMessage(request, env))
+    if (url.pathname === '/api/presence' && request.method === 'POST') return withCors(await touchPresence(request, env))
+    if (url.pathname === '/api/presence' && request.method === 'DELETE') return withCors(await removePresence(request, env))
+    if (url.pathname === '/api/users/online' && request.method === 'GET') return withCors(await getOnlineUsers(env))
+    if (url.pathname === '/api/register' && request.method === 'POST') return withCors(await register(request, env))
+    if (url.pathname === '/api/login' && request.method === 'POST') return withCors(await login(request, env))
+    if (url.pathname === '/api/whoami' && request.method === 'GET') return withCors(await whoami(request, env))
+
+    return withCors(json({ error: 'Not found' }, 404))
   },
 }
