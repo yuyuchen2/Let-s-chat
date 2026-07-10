@@ -12,6 +12,105 @@ const pageHeaders = {
   'Content-Type': 'text/html; charset=utf-8',
 }
 
+// D1 Schema initialization - ensure tables exist before any operations
+const initializeSchema = async (env) => {
+  if (!env.DB) return
+  
+  try {
+    // Check if users table exists with required columns
+    const { results: usersCheck } = await env.DB.prepare(
+      "PRAGMA table_info(users)"
+    ).all()
+    
+    const usersColumns = usersCheck.map(r => r.name)
+    const missingUsersColumns = []
+    
+    if (!usersColumns.includes('failed_login_attempts')) {
+      missingUsersColumns.push('failed_login_attempts')
+    }
+    if (!usersColumns.includes('locked_until')) {
+      missingUsersColumns.push('locked_until')
+    }
+    
+    // Add missing columns to users table if it exists
+    if (usersColumns.length > 0 && missingUsersColumns.length > 0) {
+      for (const col of missingUsersColumns) {
+        if (col === 'failed_login_attempts') {
+          await env.DB.prepare(
+            "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0"
+          ).run()
+        } else if (col === 'locked_until') {
+          await env.DB.prepare(
+            "ALTER TABLE users ADD COLUMN locked_until INTEGER"
+          ).run()
+        }
+      }
+    }
+    
+    // Create users table if it doesn't exist
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+        locked_until INTEGER,
+        created_at INTEGER NOT NULL
+      )
+    `).run()
+    
+    await env.DB.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_users_username ON users (username)
+    `).run()
+    
+    // Create sessions table
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        session_token TEXT PRIMARY KEY,
+        user TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      )
+    `).run()
+    
+    await env.DB.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at)
+    `).run()
+    
+    // Create messages table
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_token TEXT,
+        user TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+    `).run()
+    
+    await env.DB.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at DESC)
+    `).run()
+    
+    // Create online_users table
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS online_users (
+        session_token TEXT PRIMARY KEY,
+        user TEXT NOT NULL,
+        last_seen INTEGER NOT NULL
+      )
+    `).run()
+    
+    await env.DB.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_online_users_last_seen ON online_users (last_seen DESC)
+    `).run()
+    
+  } catch (err) {
+    console.error('Schema initialization error:', err)
+    // Don't fail the request if schema init fails
+  }
+}
+
 // Full chat page (Chinese) with client-side logic that uses the Worker APIs and credentials: 'include'
 const chatPage = String.raw`<!doctype html>
 <html lang="zh-CN">
@@ -464,6 +563,9 @@ export default {
     const url = new URL(request.url)
     const origin = request.headers.get('Origin')
     const allowedOrigin = origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]
+
+    // Initialize D1 schema before any database operations
+    await initializeSchema(env)
 
     if (request.method === 'OPTIONS') {
       const headers = { ...jsonHeadersBase }
