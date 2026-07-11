@@ -237,9 +237,7 @@ const chatPage = String.raw`<!doctype html>
         const password = passwordInput.value
         if (!username || !password) { showError(authError, '用户名和密码为必填'); return }
         try {
-          const resp = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ username, password }) })
-          const payload = await resp.json()
-          if (!resp.ok) { showError(authError, payload.error || '登录失败'); return }
+          const payload = await api('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) })
           enterRoomUI(payload.user)
         } catch (err) { showError(authError, err.message) }
       })
@@ -249,10 +247,10 @@ const chatPage = String.raw`<!doctype html>
         const username = usernameInput.value.trim()
         const password = passwordInput.value
         if (!username || !password) { showError(authError, '用户名和密码为必填'); return }
+        if (username.length > 50) { showError(authError, '用户名不能超过50字符'); return }
+        if (password.length < 8) { showError(authError, '密码至少8位'); return }
         try {
-          const resp = await fetch('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) })
-          const payload = await resp.json()
-          if (!resp.ok) { showError(authError, payload.error || '注册失败'); return }
+          await api('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) })
           alert('注册成功，请登录')
         } catch (err) { showError(authError, err.message) }
       })
@@ -544,8 +542,6 @@ const login = async (request, env) => {
   await env.DB.prepare('INSERT INTO online_users (session_token, user, last_seen) VALUES (?, ?, ?) ON CONFLICT(session_token) DO UPDATE SET last_seen = excluded.last_seen, user = excluded.user').bind(token, userRow.username, Date.now()).run()
 
   const headers = { ...jsonHeadersBase }
-  headers['Access-Control-Allow-Origin'] = 'https://chat.yyc2.cc.cd'
-  headers['Access-Control-Allow-Credentials'] = 'true'
   headers['Set-Cookie'] = `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}`
   return new Response(JSON.stringify({ ok: true, user: userRow.username }), { status: 200, headers })
 }
