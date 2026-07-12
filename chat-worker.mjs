@@ -18,11 +18,17 @@ const initializeSchema = async (env) => {
   
   try {
     // Check if users table exists with required columns
-    const { results: usersCheck } = await env.DB.prepare(
-      "PRAGMA table_info(users)"
-    ).all()
+    let usersColumns = []
+    try {
+      const { results: usersCheck } = await env.DB.prepare(
+        "PRAGMA table_info(users)"
+      ).all()
+      usersColumns = usersCheck.map(r => r.name)
+    } catch (e) {
+      // Table doesn't exist yet, will be created below
+      usersColumns = []
+    }
     
-    const usersColumns = usersCheck.map(r => r.name)
     const missingUsersColumns = []
     
     if (!usersColumns.includes('failed_login_attempts')) {
@@ -32,17 +38,32 @@ const initializeSchema = async (env) => {
       missingUsersColumns.push('locked_until')
     }
     
-    // Add missing columns to users table if it exists
+    // Add missing columns to users table if it exists and has data
     if (usersColumns.length > 0 && missingUsersColumns.length > 0) {
       for (const col of missingUsersColumns) {
         if (col === 'failed_login_attempts') {
-          await env.DB.prepare(
-            "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0"
-          ).run()
+          try {
+            await env.DB.prepare(
+              "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0"
+            ).run()
+          } catch (alterErr) {
+            // Column might already exist or other issue, try without NOT NULL
+            try {
+              await env.DB.prepare(
+                "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0"
+              ).run()
+            } catch (e2) {
+              console.error('Could not add failed_login_attempts column:', e2)
+            }
+          }
         } else if (col === 'locked_until') {
-          await env.DB.prepare(
-            "ALTER TABLE users ADD COLUMN locked_until INTEGER"
-          ).run()
+          try {
+            await env.DB.prepare(
+              "ALTER TABLE users ADD COLUMN locked_until INTEGER"
+            ).run()
+          } catch (alterErr) {
+            console.error('Could not add locked_until column:', alterErr)
+          }
         }
       }
     }
@@ -505,10 +526,14 @@ const register = async (request, env) => {
     await env.DB.prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)').bind(username, hash, now).run()
     return json({ ok: true, user: username }, 201)
   } catch (err) {
-    if (err && /UNIQUE|constraint/i.test(err.message)) {
+    // Check for D1 UNIQUE constraint error - can be in message or errors array
+    const errorMessage = String(err?.message || '')
+    const errorString = JSON.stringify(err) + errorMessage
+    if (/UNIQUE|constraint|UNIQUE constraint failed/i.test(errorString)) {
       return json({ error: '用户名已存在', code: 'USERNAME_TAKEN', field: 'username' }, 409)
     }
-    return json({ error: '注册失败', code: 'REGISTER_FAILED', detail: String(err && err.message) }, 500)
+    console.error('Registration error:', err)
+    return json({ error: '注册失败', code: 'REGISTER_FAILED', detail: errorMessage || String(err) }, 500)
   }
 }
 
