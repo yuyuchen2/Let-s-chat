@@ -1,7 +1,0 @@
-{
-  "name": "worker",
-  "version": "1.0.0",
-  "description": "Cloudflare Worker for LetsChat",
-  "type": "module",
-  "dependencies": {}
-}
