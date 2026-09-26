@@ -1,3 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 /* animation and skeleton styles */
 @keyframes slideUpFade { from { transform: translateY(8px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
 .message { transform-origin: left top; animation: slideUpFade 220ms cubic-bezier(.2,.8,.2,1) both }
