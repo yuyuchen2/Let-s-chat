@@ -8,4 +8,4 @@ workers_dev = true
 [[d1_databases]]
 binding = "DB"
 database_name = "chat_db"
-database_id = "d3d83a2c-765a-4993-a4aa-0cdd0b7e6ae9"
+database_id = "608ff3bc-2dd2-412e-ba39-2ae84eb89698"
