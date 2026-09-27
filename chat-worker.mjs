@@ -4,111 +4,10 @@ const jsonHeadersBase = {
   'Content-Type': 'application/json; charset=utf-8',
   'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
-  'Access-Control-Allow-Credentials': 'true',
-  'Access-Control-Allow-Origin': ALLOWED_ORIGINS[0],
 }
 
 const pageHeaders = {
   'Content-Type': 'text/html; charset=utf-8',
-}
-
-// D1 Schema initialization - ensure tables exist before any operations
-const initializeSchema = async (env) => {
-  if (!env.DB) return
-  
-  try {
-    // Check if users table exists with required columns
-    const { results: usersCheck } = await env.DB.prepare(
-      "PRAGMA table_info(users)"
-    ).all()
-    
-    const usersColumns = usersCheck.map(r => r.name)
-    const missingUsersColumns = []
-    
-    if (!usersColumns.includes('failed_login_attempts')) {
-      missingUsersColumns.push('failed_login_attempts')
-    }
-    if (!usersColumns.includes('locked_until')) {
-      missingUsersColumns.push('locked_until')
-    }
-    
-    // Add missing columns to users table if it exists
-    if (usersColumns.length > 0 && missingUsersColumns.length > 0) {
-      for (const col of missingUsersColumns) {
-        if (col === 'failed_login_attempts') {
-          await env.DB.prepare(
-            "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0"
-          ).run()
-        } else if (col === 'locked_until') {
-          await env.DB.prepare(
-            "ALTER TABLE users ADD COLUMN locked_until INTEGER"
-          ).run()
-        }
-      }
-    }
-    
-    // Create users table if it doesn't exist
-    await env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        failed_login_attempts INTEGER NOT NULL DEFAULT 0,
-        locked_until INTEGER,
-        created_at INTEGER NOT NULL
-      )
-    `).run()
-    
-    await env.DB.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_users_username ON users (username)
-    `).run()
-    
-    // Create sessions table
-    await env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        session_token TEXT PRIMARY KEY,
-        user TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL
-      )
-    `).run()
-    
-    await env.DB.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at)
-    `).run()
-    
-    // Create messages table
-    await env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_token TEXT,
-        user TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      )
-    `).run()
-    
-    await env.DB.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at DESC)
-    `).run()
-    
-    // Create online_users table
-    await env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS online_users (
-        session_token TEXT PRIMARY KEY,
-        user TEXT NOT NULL,
-        last_seen INTEGER NOT NULL
-      )
-    `).run()
-    
-    await env.DB.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_online_users_last_seen ON online_users (last_seen DESC)
-    `).run()
-    
-  } catch (err) {
-    console.error('Schema initialization error:', err)
-    // Don't fail the request if schema init fails
-  }
 }
 
 // Full chat page (Chinese) with client-side logic that uses the Worker APIs and credentials: 'include'
@@ -327,7 +226,7 @@ const verifyPassword = async (password, storedHash) => {
   if (typeof storedHash !== 'string') return false
   const [algorithm, iterationsRaw, saltRaw, keyRaw] = storedHash.split('$')
   const iterations = Number(iterationsRaw)
-  if (algorithm !== 'pbkdf2-sha256' || !Number.isSafeInteger(iterations) || iterations <= 0 || !saltRaw || !keyRaw) {
+  if (algorithm !== 'pbkdf2-sha256' || !Number.isSafeInteger(iterations) || iterations < PASSWORD_ITERATIONS || iterations > PASSWORD_ITERATIONS * 2 || !saltRaw || !keyRaw) {
     return false
   }
 
@@ -401,7 +300,7 @@ const getMessages = async (env) => {
   if (missingDb) return missingDb
 
   const { results } = await env.DB.prepare(
-    'SELECT id, user, content, created_at FROM messages ORDER BY created_at DESC LIMIT 50',
+    'SELECT id, user, content, created_at FROM messages ORDER BY created_at DESC, id DESC LIMIT 50',
   ).all()
 
   return json(results)
@@ -510,7 +409,8 @@ const register = async (request, env) => {
     if (err && /UNIQUE|constraint/i.test(err.message)) {
       return json({ error: '用户名已存在', code: 'USERNAME_TAKEN', field: 'username' }, 409)
     }
-    return json({ error: '注册失败', code: 'REGISTER_FAILED', detail: String(err && err.message) }, 500)
+    console.error('Registration failed:', err)
+    return json({ error: '注册失败', code: 'REGISTER_FAILED' }, 500)
   }
 }
 
@@ -524,7 +424,7 @@ const login = async (request, env) => {
   if (!username || !password) return json({ error: '用户名和密码均为必填项', code: 'CREDENTIALS_REQUIRED' }, 400)
 
   const { results } = await env.DB.prepare('SELECT id, username, password_hash, failed_login_attempts, locked_until FROM users WHERE username = ? LIMIT 1').bind(username).all()
-  if (!results || results.length === 0) return json({ error: '用户不存在', code: 'USER_NOT_FOUND', field: 'username' }, 401)
+  if (!results || results.length === 0) return json({ error: '用户名或密码错误', code: 'INVALID_CREDENTIALS' }, 401)
   const userRow = results[0]
   const now = Date.now()
   if (userRow.locked_until && userRow.locked_until > now) return json({ error: '账户被暂时锁定，请稍后重试', code: 'ACCOUNT_LOCKED', retry_after_ms: userRow.locked_until - now }, 403)
@@ -534,7 +434,7 @@ const login = async (request, env) => {
     const attempts = (userRow.failed_login_attempts || 0) + 1
     const lockedUntil = attempts >= MAX_FAILED ? now + LOCK_DURATION_MS : null
     await env.DB.prepare('UPDATE users SET failed_login_attempts = ?, locked_until = ? WHERE id = ?').bind(attempts, lockedUntil, userRow.id).run()
-    return json({ error: '密码错误', code: 'INVALID_PASSWORD', attempts, locked_until: lockedUntil }, 401)
+    return json({ error: '用户名或密码错误', code: 'INVALID_CREDENTIALS' }, 401)
   }
 
   await env.DB.prepare('UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?').bind(userRow.id).run()
@@ -544,8 +444,6 @@ const login = async (request, env) => {
   await env.DB.prepare('INSERT INTO online_users (session_token, user, last_seen) VALUES (?, ?, ?) ON CONFLICT(session_token) DO UPDATE SET last_seen = excluded.last_seen, user = excluded.user').bind(token, userRow.username, Date.now()).run()
 
   const headers = { ...jsonHeadersBase }
-  headers['Access-Control-Allow-Origin'] = allowedOrigin
-  headers['Access-Control-Allow-Credentials'] = 'true'
   headers['Set-Cookie'] = `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}`
   return new Response(JSON.stringify({ ok: true, user: userRow.username }), { status: 200, headers })
 }
@@ -562,17 +460,21 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url)
     const origin = request.headers.get('Origin')
-    const allowedOrigin = origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]
-
-    // Initialize D1 schema before any database operations
-    await initializeSchema(env)
+    const allowedOrigin = origin && ALLOWED_ORIGINS.includes(origin) ? origin : null
 
     if (request.method === 'OPTIONS') {
       const headers = { ...jsonHeadersBase }
-      if (origin && !ALLOWED_ORIGINS.includes(origin)) return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers })
-      headers['Access-Control-Allow-Origin'] = allowedOrigin
-      headers['Access-Control-Allow-Credentials'] = 'true'
+      if (origin && !allowedOrigin) return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers })
+      if (allowedOrigin) {
+        headers['Access-Control-Allow-Origin'] = allowedOrigin
+        headers['Access-Control-Allow-Credentials'] = 'true'
+        headers.Vary = 'Origin'
+      }
       return new Response(null, { status: 204, headers })
+    }
+
+    if (origin && !allowedOrigin && url.pathname.startsWith('/api/')) {
+      return json({ error: 'Origin not allowed' }, 403)
     }
 
     if (url.pathname === '/') {
@@ -581,10 +483,11 @@ export default {
 
     // Helper to add CORS headers to responses
     const withCors = (response) => {
-      if (!response.headers.has('Access-Control-Allow-Origin')) {
+      if (allowedOrigin && !response.headers.has('Access-Control-Allow-Origin')) {
         const headers = new Headers(response.headers)
         headers.set('Access-Control-Allow-Origin', allowedOrigin)
         headers.set('Access-Control-Allow-Credentials', 'true')
+        headers.append('Vary', 'Origin')
         return new Response(response.body, {
           status: response.status,
           statusText: response.statusText,
